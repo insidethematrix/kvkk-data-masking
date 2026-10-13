@@ -18,12 +18,43 @@ def _mask_email(value):
     return local_part[0] + "***@" + domain
 
 
+def _mask_digits(value, keep_first, keep_last):
+    # Değerdeki rakamları yıldızlar; baştan keep_first ve sondan keep_last rakam görünür kalır.
+    # Rakam olmayan karakterler (boşluk, nokta, "TR") olduğu gibi bırakılır,
+    # böylece maskelenmiş değer orijinal yazım biçimini korur.
+    total_digits = len(digits_only(value))
+    result = ""
+    digit_index = 0
+    for char in value:
+        if char.isdigit():
+            if digit_index < keep_first or digit_index >= total_digits - keep_last:
+                result += char
+            else:
+                result += "*"
+            digit_index += 1
+        else:
+            result += char
+    return result
+
+
 def mask(finding):
-    # Bulgunun türüne göre uygun maskeleme fonksiyonunu çağırır.
+    # Bulgunun türüne göre uygun maskeleme kuralını uygular.
     if finding.kind == "PHONE":
         return _mask_phone(finding.value)
     if finding.kind == "EMAIL":
         return _mask_email(finding.value)
+    if finding.kind == "TCKN":
+        # 12345678950 -> 123******50
+        return _mask_digits(finding.value, 3, 2)
+    if finding.kind == "IBAN":
+        # TR40 0006 1000 ... 4567 89 -> TR40 **** **** ... **67 89 (kontrol haneleri ve son 4 hane)
+        return _mask_digits(finding.value, 2, 4)
+    if finding.kind == "CREDIT_CARD":
+        # PCI DSS'e uygun olarak sadece son 4 hane görünür: **** **** **** 1111
+        return _mask_digits(finding.value, 0, 4)
+    if finding.kind == "BIRTH_DATE":
+        # 15.06.1990 -> **.**.1990 (genelleştirme: sadece yıl kalır)
+        return _mask_digits(finding.value, 0, 4)
     # Henüz özel kuralı olmayan türler tamamen yıldızlanır.
     return "*" * len(finding.value)
 

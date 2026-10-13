@@ -1,6 +1,8 @@
 import re
 from dataclasses import dataclass
 
+from kvkk.validation import is_valid_date, is_valid_iban, is_valid_luhn, is_valid_tckn
+
 
 @dataclass
 class Finding:
@@ -24,12 +26,41 @@ PHONE_PATTERN = re.compile(
     r"(?!\d)"
 )
 
+# TC kimlik: 0 ile başlamayan, tam olarak 11 haneli sayı.
+TCKN_PATTERN = re.compile(r"(?<!\d)[1-9]\d{10}(?!\d)")
 
-def _find_with_pattern(text, pattern, kind):
-    # Verilen regex desenine uyan tüm parçaları Finding listesi olarak döndürür.
+# TR IBAN: TR + 24 rakam; 4'erli gruplar arasında isteğe bağlı boşluk olabilir.
+# Örnek: TR40 0006 1000 0000 0123 4567 89  veya  TR400006100000000123456789
+IBAN_PATTERN = re.compile(r"\bTR\d{2}(?: ?\d{4}){5} ?\d{2}(?!\d)", re.IGNORECASE)
+
+# Kart: 13-19 rakam, rakamlar arasında isteğe bağlı boşluk veya tire.
+CARD_PATTERN = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
+
+# Tarih: gg.aa.yyyy, gg/aa/yyyy veya gg-aa-yyyy
+DATE_PATTERN = re.compile(r"(?<!\d)\d{2}[./-]\d{2}[./-]\d{4}(?!\d)")
+
+# Bir tarihin "doğum tarihi" sayılması için yakınında geçmesi gereken ifadeler.
+BIRTH_DATE_KEYWORDS = ["doğum", "dogum", "d.t", "d. tarihi"]
+BIRTH_DATE_WINDOW = 20  # Tarihin önünde ve arkasında bakılacak karakter sayısı
+
+# Çakışmada hangi türün kazanacağı: sayı küçük olan daha önceliklidir.
+PRIORITY = {
+    "IBAN": 1,
+    "CREDIT_CARD": 2,
+    "TCKN": 3,
+    "PHONE": 4,
+    "BIRTH_DATE": 5,
+    "EMAIL": 6,
+}
+
+
+def _find_with_pattern(text, pattern, kind, validator=None):
+    # Verilen regex desenine uyan parçaları Finding listesi olarak döndürür.
+    # validator verilmişse, sadece doğrulamadan geçen adaylar listeye eklenir.
     findings = []
     for match in pattern.finditer(text):
-        findings.append(Finding(kind, match.group(), match.start(), match.end()))
+        if validator is None or validator(match.group()):
+            findings.append(Finding(kind, match.group(), match.start(), match.end()))
     return findings
 
 
@@ -43,8 +74,77 @@ def find_phones(text):
     return _find_with_pattern(text, PHONE_PATTERN, "PHONE")
 
 
+def find_tckns(text):
+    # Metindeki 11 haneli sayılardan TC kimlik algoritmasına uyanları bulur.
+    return _find_with_pattern(text, TCKN_PATTERN, "TCKN", is_valid_tckn)
+
+
+def find_ibans(text):
+    # Metindeki TR IBAN'lardan mod-97 kontrolünü geçenleri bulur.
+    return _find_with_pattern(text, IBAN_PATTERN, "IBAN", is_valid_iban)
+
+
+def find_cards(text):
+    # Metindeki rakam dizilerinden Luhn kontrolünü geçenleri kart numarası sayar.
+    return _find_with_pattern(text, CARD_PATTERN, "CREDIT_CARD", is_valid_luhn)
+
+
+def _has_birth_keyword_nearby(text, start, end):
+    # Tarihin etrafındaki küçük bir pencerede "doğum" benzeri bir ifade var mı bakar.
+    window = text[max(0, start - BIRTH_DATE_WINDOW):end + BIRTH_DATE_WINDOW].lower()
+    for keyword in BIRTH_DATE_KEYWORDS:
+        if keyword in window:
+            return True
+    return False
+
+
+def find_birth_dates(text):
+    # Takvimde gerçekten var olan ve yakınında "doğum" ifadesi geçen tarihleri bulur.
+    # Bağlamı olmayan tarihler (ör. fatura tarihi) kişisel veri sayılmaz.
+    findings = []
+    for finding in _find_with_pattern(text, DATE_PATTERN, "BIRTH_DATE", is_valid_date):
+        if _has_birth_keyword_nearby(text, finding.start, finding.end):
+            findings.append(finding)
+    return findings
+
+
+def overlaps(first, second):
+    # İki bulgunun metinde en az bir karakteri ortak mı kontrol eder.
+    # Uç uca değen bulgular (biri bittiği yerde öteki başlıyorsa) çakışmış sayılmaz.
+    return first.start < second.end and second.start < first.end
+
+
+def resolve_overlaps(findings):
+    # Çakışan bulgulardan sadece birini tutar; kazananı PRIORITY sözlüğü belirler.
+    # Örnek: Boşluklu bir IBAN'ın içindeki rakamlar Luhn'dan geçip kart sanılabilir,
+    # bu durumda IBAN kalmalı, kart bulgusu atılmalı.
+    # 1) Önemliden önemsize sırala. Öncelik eşitse uzun olan bulgu önce gelir
+    #    (eksi işareti uzunluğu büyükten küçüğe sıralatır).
+    ordered = sorted(findings, key=lambda f: (PRIORITY[f.kind], -(f.end - f.start)))
+
+    # 2) Sırayla her bulguya bak; tutulanlardan biriyle çakışıyorsa atla.
+    kept = []
+    for finding in ordered:
+        has_conflict = False
+        for kept_finding in kept:
+            if overlaps(finding, kept_finding):
+                has_conflict = True
+                break
+        if not has_conflict:
+            kept.append(finding)
+    return kept
+
+
 def find_all(text):
-    # Tüm veri türlerini arar ve bulguları metindeki sıraya göre döndürür.
-    findings = find_emails(text) + find_phones(text)
+    # Tüm veri türlerini arar, çakışmaları çözer ve bulguları metindeki sıraya göre döndürür.
+    findings = (
+        find_ibans(text)
+        + find_cards(text)
+        + find_tckns(text)
+        + find_phones(text)
+        + find_birth_dates(text)
+        + find_emails(text)
+    )
+    findings = resolve_overlaps(findings)
     findings.sort(key=lambda f: f.start)
     return findings
