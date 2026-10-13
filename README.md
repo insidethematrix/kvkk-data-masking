@@ -13,7 +13,7 @@ Work in progress.
 
 - [x] Email and phone detection, masking
 - [x] TCKN, IBAN (mod-97), credit card (Luhn) and date validation
-- [ ] Fake data generator
+- [x] Fake data generator (`python -m scripts.generate_fake_data`)
 - [ ] TCKN / IBAN / card / birth date detection
 - [ ] Pseudonymization and removal
 - [ ] Highlighting and risk report (incl. special category data warnings)
